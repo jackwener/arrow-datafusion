@@ -69,6 +69,11 @@ pub trait OptimizerRule {
 
     /// A human readable name for this optimizer rule
     fn name(&self) -> &str;
+
+    /// If a rule use default None, its should traverse recursively plan inside itself
+    fn apply_order(&self) -> Option<ApplyOrder> {
+        None
+    }
 }
 
 /// Options to control the DataFusion Optimizer.
@@ -157,6 +162,11 @@ pub struct Optimizer {
     pub rules: Vec<Arc<dyn OptimizerRule + Send + Sync>>,
 }
 
+pub enum ApplyOrder {
+    TopDown,
+    BottomUp,
+}
+
 impl Optimizer {
     /// Create a new optimizer using the recommended list of rules
     pub fn new(config: &OptimizerConfig) -> Self {
@@ -223,7 +233,7 @@ impl Optimizer {
             log_plan(&format!("Optimizer input (pass {})", i), &new_plan);
 
             for rule in &self.rules {
-                let result = rule.try_optimize(&new_plan, optimizer_config);
+                let result = self.optimize_recursively(rule, &new_plan, optimizer_config);
                 match result {
                     Ok(Some(plan)) => {
                         if !plan.schema().equivalent_names_and_types(new_plan.schema()) {
@@ -283,6 +293,84 @@ impl Optimizer {
         log_plan("Final optimized plan", &new_plan);
         debug!("Optimizer took {} ms", start_time.elapsed().as_millis());
         Ok(new_plan)
+    }
+
+    fn optimize_node(
+        &self,
+        rule: &Arc<dyn OptimizerRule + Send + Sync>,
+        plan: &LogicalPlan,
+        optimizer_config: &mut OptimizerConfig,
+    ) -> Result<Option<LogicalPlan>> {
+        // TODO: future feature: We can do Batch optimize
+        // for rule in self.rules {
+        //     let result = rule.optimize(&plan, optimizer_config);
+        //         plan = result?;
+        //         self.stats.count_rule(rule);
+        //     }
+        // }
+        rule.try_optimize(plan, optimizer_config)
+    }
+
+    fn optimize_inputs(
+        &self,
+        rule: &Arc<dyn OptimizerRule + Send + Sync>,
+        plan: &LogicalPlan,
+        optimizer_config: &mut OptimizerConfig,
+    ) -> Result<Option<LogicalPlan>> {
+        let inputs = plan.inputs();
+        let result = inputs
+            .iter()
+            .map(|sub_plan| self.optimize_recursively(rule, sub_plan, optimizer_config))
+            .collect::<Result<Vec<_>>>()?;
+        if result.is_empty() || result.iter().all(|o| o.is_none()) {
+            return Ok(None);
+        }
+
+        let new_inputs = result
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| match o {
+                Some(plan) => plan,
+                None => (*(inputs.get(i).unwrap())).clone(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(plan.with_new_inputs(new_inputs.as_slice())?))
+    }
+
+    pub fn optimize_recursively(
+        &self,
+        rule: &Arc<dyn OptimizerRule + Send + Sync>,
+        plan: &LogicalPlan,
+        optimizer_config: &mut OptimizerConfig,
+    ) -> Result<Option<LogicalPlan>> {
+        match rule.apply_order() {
+            Some(order) => match order {
+                ApplyOrder::TopDown => {
+                    let optimize_self_opt =
+                        self.optimize_node(rule, plan, optimizer_config)?;
+                    let optimize_inputs_opt = match &optimize_self_opt {
+                        Some(optimized_plan) => {
+                            self.optimize_inputs(rule, optimized_plan, optimizer_config)?
+                        }
+                        _ => self.optimize_inputs(rule, plan, optimizer_config)?,
+                    };
+                    Ok(optimize_inputs_opt.or(optimize_self_opt))
+                }
+                ApplyOrder::BottomUp => {
+                    let optimize_inputs_opt =
+                        self.optimize_inputs(rule, plan, optimizer_config)?;
+                    let optimize_self_opt = match &optimize_inputs_opt {
+                        Some(optimized_plan) => {
+                            self.optimize_node(rule, optimized_plan, optimizer_config)?
+                        }
+                        _ => self.optimize_node(rule, plan, optimizer_config)?,
+                    };
+                    Ok(optimize_self_opt.or(optimize_inputs_opt))
+                }
+            },
+            _ => rule.try_optimize(plan, optimizer_config),
+        }
     }
 }
 
@@ -407,11 +495,11 @@ mod tests {
     struct BadRule {}
 
     impl OptimizerRule for BadRule {
-        fn optimize(
+        fn try_optimize(
             &self,
             _plan: &LogicalPlan,
             _optimizer_config: &mut OptimizerConfig,
-        ) -> datafusion_common::Result<LogicalPlan> {
+        ) -> datafusion_common::Result<Option<LogicalPlan>> {
             Err(DataFusionError::Plan("rule failed".to_string()))
         }
 
@@ -424,13 +512,13 @@ mod tests {
     struct GetTableScanRule {}
 
     impl OptimizerRule for GetTableScanRule {
-        fn optimize(
+        fn try_optimize(
             &self,
             _plan: &LogicalPlan,
             _optimizer_config: &mut OptimizerConfig,
-        ) -> datafusion_common::Result<LogicalPlan> {
+        ) -> datafusion_common::Result<Option<LogicalPlan>> {
             let table_scan = test_table_scan()?;
-            LogicalPlanBuilder::from(table_scan).build()
+            Ok(Some(LogicalPlanBuilder::from(table_scan).build()?))
         }
 
         fn name(&self) -> &str {
