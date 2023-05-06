@@ -1272,13 +1272,6 @@ impl Projection {
             schema,
         }
     }
-
-    pub fn try_from_plan(plan: &LogicalPlan) -> Result<&Projection> {
-        match plan {
-            LogicalPlan::Projection(it) => Ok(it),
-            _ => plan_err!("Could not coerce into Projection!"),
-        }
-    }
 }
 
 /// Aliased subquery

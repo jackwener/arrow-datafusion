@@ -163,6 +163,7 @@ fn create_join_context(
 ) -> Result<SessionContext> {
     let ctx = SessionContext::with_config(
         SessionConfig::new()
+            .set_bool("datafusion.optimizer.skip_failed_rules", false)
             .with_repartition_joins(repartition_joins)
             .with_target_partitions(2)
             .with_batch_size(4096),

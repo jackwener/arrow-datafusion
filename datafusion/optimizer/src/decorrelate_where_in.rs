@@ -22,9 +22,9 @@ use crate::utils::{
     replace_qualified_name, split_conjunction,
 };
 use crate::{OptimizerConfig, OptimizerRule};
-use datafusion_common::{context, Column, Result};
+use datafusion_common::{context, Column, DataFusionError, Result};
 use datafusion_expr::expr_rewriter::unnormalize_col;
-use datafusion_expr::logical_plan::{JoinType, Projection, Subquery};
+use datafusion_expr::logical_plan::{JoinType, Subquery};
 use datafusion_expr::{Expr, Filter, LogicalPlan, LogicalPlanBuilder};
 use log::debug;
 use std::sync::Arc;
@@ -130,7 +130,7 @@ impl OptimizerRule for DecorrelateWhereIn {
 /// If the subquery is a correlated subquery, we need extract the join predicate from the subquery.
 ///
 /// For example, given a query like:
-/// `select t1.a, t1.b from t1 where t1 in (select t2.a from t2 where t1.b = t2.b and t1.c > t2.c)`
+/// `select t1.a, t1.b from t1 where t1.a in (select t2.a from t2 where t1.b = t2.b and t1.c > t2.c)`
 ///
 /// The optimized plan will be:
 ///
@@ -147,15 +147,24 @@ fn optimize_where_in(
     left: &LogicalPlan,
     alias: &AliasGenerator,
 ) -> Result<LogicalPlan> {
-    let projection = Projection::try_from_plan(&query_info.query.subquery)
-        .map_err(|e| context!("a projection is required", e))?;
-    let subquery_input = projection.input.clone();
+    let subquery = &query_info.query.subquery;
+    let mut plan = subquery.as_ref();
+    while matches!(plan, LogicalPlan::Limit(_) | LogicalPlan::Sort(_)) {
+        plan = plan.inputs()[0];
+    }
+    let projection = match plan {
+        LogicalPlan::Projection(projection) => Ok(projection),
+        _ => Err(DataFusionError::Plan(
+            "a projection is required".to_string(),
+        )),
+    }?;
+
     // TODO add the validate logic to Analyzer
     let subquery_expr = only_or_err(projection.expr.as_slice())
         .map_err(|e| context!("single expression projection required", e))?;
 
     // extract join filters
-    let (join_filters, subquery_input) = extract_join_filters(subquery_input.as_ref())?;
+    let (join_filters, subquery_input) = extract_join_filters(projection.input.as_ref())?;
 
     // in_predicate may be also include in the join filters, remove it from the join filters.
     let in_predicate = Expr::eq(query_info.where_in_expr.clone(), subquery_expr.clone());
