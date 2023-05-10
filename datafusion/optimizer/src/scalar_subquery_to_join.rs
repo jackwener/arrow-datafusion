@@ -41,7 +41,7 @@ impl ScalarSubqueryToJoin {
         Self::default()
     }
 
-    /// Finds expressions that have a scalar subquery in them (and recurses when found)
+    /// Finds expressions that have a scalar subquery in them (and recurse when found)
     ///
     /// # Arguments
     /// * `predicate` - A conjunction to split and search
@@ -178,11 +178,7 @@ fn optimize_scalar(
     alias: &AliasGenerator,
 ) -> Result<Option<LogicalPlan>> {
     let subquery = query_info.query.subquery.as_ref();
-    debug!(
-        "optimizing:
-{}",
-        subquery.display_indent()
-    );
+    debug!("optimizing:{}", subquery.display_indent());
     let proj = match &subquery {
         LogicalPlan::Projection(proj) => proj,
         _ => {
