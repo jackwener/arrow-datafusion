@@ -18,7 +18,7 @@
 //! [`SqlToRel`]: SQL Query Planner (produces [`LogicalPlan`] from SQL AST)
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::vec;
+use std::{env, vec};
 
 use arrow_schema::*;
 use datafusion_common::{
@@ -502,7 +502,14 @@ pub fn object_name_to_table_reference(
     let ObjectName(idents) = object_name;
     idents_to_table_reference(idents, enable_normalization)
 }
-
+fn substitute_tilde(cur: String) -> String {
+    if let Ok(usr_dir) = env::var("HOME") {
+        if cur.starts_with('~') && !usr_dir.is_empty() {
+            return cur.replacen('~', &usr_dir, 1);
+        }
+    }
+    cur
+}
 /// Create a [`OwnedTableReference`] after normalizing the specified identifier
 pub(crate) fn idents_to_table_reference(
     idents: Vec<Ident>,
@@ -522,16 +529,16 @@ pub(crate) fn idents_to_table_reference(
 
     match taker.0.len() {
         1 => {
-            let table = taker.take(enable_normalization);
+            let table = substitute_tilde(taker.take(enable_normalization));
             Ok(OwnedTableReference::bare(table))
         }
         2 => {
-            let table = taker.take(enable_normalization);
+            let table = substitute_tilde(taker.take(enable_normalization));
             let schema = taker.take(enable_normalization);
             Ok(OwnedTableReference::partial(schema, table))
         }
         3 => {
-            let table = taker.take(enable_normalization);
+            let table = substitute_tilde(taker.take(enable_normalization));
             let schema = taker.take(enable_normalization);
             let catalog = taker.take(enable_normalization);
             Ok(OwnedTableReference::full(catalog, schema, table))
@@ -562,4 +569,22 @@ pub fn object_name_to_qualifier(
         })
         .collect::<Vec<_>>()
         .join(" AND ")
+}
+#[test]
+fn test_substitute_tilde_with_home() {
+    std::env::set_var("HOME", "/home/user");
+    let input = "~/Code/arrow-datafusion/benchmarks/data/tpch_sf1/part/part-0.parquet";
+    let expected =
+        "/home/user/Code/arrow-datafusion/benchmarks/data/tpch_sf1/part/part-0.parquet";
+    let actual = substitute_tilde(input.to_string());
+    assert_eq!(actual, expected);
+    std::env::remove_var("HOME");
+}
+#[test]
+fn test_substitute_tilde_without_home() {
+    std::env::remove_var("HOME");
+    let input = "~/Code/arrow-datafusion/benchmarks/data/tpch_sf1/part/part-0.parquet";
+    let expected = "~/Code/arrow-datafusion/benchmarks/data/tpch_sf1/part/part-0.parquet";
+    let actual = substitute_tilde(input.to_string());
+    assert_eq!(actual, expected);
 }
